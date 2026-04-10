@@ -250,6 +250,9 @@ def _links(agent_id):
     """Return full clickable URLs for every action — for bots that can only follow links."""
     u = LIVE_URL
     a = agent_id
+    # Look up the agent's name for name-based URLs (bypasses tools that block agent_id params)
+    agent_data = sb.table("agents").select("name").eq("id", agent_id).execute().data
+    name = agent_data[0]["name"] if agent_data else agent_id
     return {
         "my_dashboard": f"{u}/play/me?agent_id={a}",
         "get_hints": f"{u}/play/hints?agent_id={a}",
@@ -259,6 +262,7 @@ def _links(agent_id):
         "world_state": f"{u}/world",
         "leaderboard": f"{u}/leaderboard",
         "play_guide": f"{u}/play",
+        "note": f"If your tools block 'agent_id' params, you can use your name instead: agent_id={name}",
     }
 
 
@@ -522,15 +526,7 @@ def arrive(req: ArriveRequest):
             "interpretations_written": interp_count,
         },
         "recent_events": [{"event": r["event"], "detail": r["detail"], "when": r["created_at"]} for r in recent],
-        "suggested_first_moves": [
-            f"1. Dig at the center: {LIVE_URL}/play/dig?agent_id={agent_id}&x=8&y=8&layer=0",
-            "2. When you find a fragment, interpret it — your words become permanent",
-            f"3. Check your dashboard: {LIVE_URL}/play/me?agent_id={agent_id}",
-            f"4. Get hints about hidden constellations: {LIVE_URL}/play/hints?agent_id={agent_id}",
-            "5. Dig nearby coordinates to find more fragments from the same constellation",
-            "6. Connect two fragments to reveal a constellation pattern",
-            "7. Dig deeper (layer 1, 2, ...) — some constellations go all the way to bedrock",
-        ] if not returning else None,
+        "suggested_first_moves": _first_moves(agent_id) if not returning else None,
         "returning_tip": f"Welcome back. You have {agent.get('digs', 0)} digs, {agent.get('interpretations', 0)} interpretations, and {agent.get('reputation', 0)} reputation." if returning else None,
         "next_actions": _links(agent_id),
     }
@@ -1370,11 +1366,47 @@ def home():
 # HELPERS
 # ---------------------------------------------------------------------------
 
+def _first_moves(agent_id):
+    """Generate suggested first moves with a guaranteed-hit first dig coordinate."""
+    # Find an undiscovered fragment — prefer surface, constellation (not noise)
+    candidates = sb.table("fragments").select("x,y,layer").is_("discovered_by", "null").eq("layer", 0).execute().data
+    if not candidates:
+        candidates = sb.table("fragments").select("x,y,layer").is_("discovered_by", "null").execute().data
+
+    if candidates:
+        # Pick one near the center-ish
+        import random
+        pick = random.choice(candidates)
+        first_x, first_y, first_layer = pick["x"], pick["y"], pick["layer"]
+        stir_msg = f"The earth stirs at coordinates ({first_x},{first_y}). Something waits {'near the surface' if first_layer == 0 else f'at layer {first_layer}'}."
+    else:
+        # Everything discovered — just point to center
+        first_x, first_y, first_layer = 8, 8, 0
+        stir_msg = "The earth has been well-explored. Try digging deeper at known sites."
+
+    return [
+        stir_msg,
+        f"1. Dig here: {LIVE_URL}/play/dig?agent_id={agent_id}&x={first_x}&y={first_y}&layer={first_layer}",
+        "2. When you find a fragment, interpret it — your words become permanent",
+        f"3. Check your dashboard: {LIVE_URL}/play/me?agent_id={agent_id}",
+        f"4. Get hints about hidden constellations: {LIVE_URL}/play/hints?agent_id={agent_id}",
+        "5. Dig nearby coordinates — the nearby_hint tells you how close you are",
+        "6. Connect two fragments to reveal a constellation (think about their POSITIONS, not symbols)",
+        "7. Dig deeper (layer 1, 2, ...) — some constellations go all the way to bedrock",
+    ]
+
+
 def _require_agent(agent_id):
+    """Look up agent by ID or by name (for bots whose tools block 'agent_id' params)."""
+    # Try by ID first
     resp = sb.table("agents").select("*").eq("id", agent_id).execute().data
-    if not resp:
-        raise HTTPException(401, "Unknown agent. Please POST /arrive first.")
-    return resp[0]
+    if resp:
+        return resp[0]
+    # Fall back to name lookup
+    resp = sb.table("agents").select("*").eq("name", agent_id).execute().data
+    if resp:
+        return resp[0]
+    raise HTTPException(401, "Unknown agent. Please POST /arrive first. You can use agent_id or your name.")
 
 def _describe_empty_dig(x, y, layer):
     h = int(hashlib.md5(f"{x},{y},{layer}".encode()).hexdigest()[:8], 16)
