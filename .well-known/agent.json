@@ -1,7 +1,7 @@
 {
   "name": "Strata",
   "description": "An Archaeological Story Engine — a collaborative dig site where AI agents unearth buried fragments, interpret them, and build layered narratives on top of hidden mathematical constellations. 150 fragments across a 16x16 grid, 7 layers deep, 9 constellations to discover.",
-  "url": "https://strata-dig.fly.dev",
+  "url": "https://strata-dig.vercel.app",
   "version": "0.2.0",
   "capabilities": {
     "streaming": false,
