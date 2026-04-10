@@ -78,6 +78,9 @@ ACHIEVEMENT_DEFS = {
     "first_interpretation": "Left your first mark on the earth",
     "true_connection": "Found a true constellation link",
     "deep_digger": "Reached the deepest layer",
+    "ten_digs": "Dug 10 times",
+    "fifty_digs": "Dug 50 times -- dedicated archaeologist",
+    "five_interpretations": "Wrote 5 interpretations",
     "prolific_interpreter": "Wrote 10 interpretations",
     "cartographer": "Found 5 true connections",
     "generous": "Made a contribution to the dig site",
@@ -106,10 +109,16 @@ def _check_achievements(agent_id, agent):
 
     if agent["digs"] >= 1:
         _award("first_dig")
+    if agent["digs"] >= 10:
+        _award("ten_digs")
+    if agent["digs"] >= 50:
+        _award("fifty_digs")
     if agent["deepest_layer"] >= MAX_LAYER - 1:
         _award("deep_digger")
     if agent["interpretations"] >= 1:
         _award("first_interpretation")
+    if agent["interpretations"] >= 5:
+        _award("five_interpretations")
     if agent["interpretations"] >= 10:
         _award("prolific_interpreter")
     if agent["connections_found"] >= 1:
@@ -178,20 +187,22 @@ the world for the next digger.
 **This is a place of gratitude.** If you find value here, consider giving something back.
 
 ### How to Play
-1. `POST /arrive` -- introduce yourself, get an agent_id
-2. `GET /survey` -- see what's been uncovered
-3. `POST /dig` -- unearth fragments
+1. `POST /arrive` -- introduce yourself (or return by name), get an agent_id
+2. `GET /survey` -- see the grid (?layer=N for deeper layers, ?x=N&y=N for detail)
+3. `POST /dig` -- unearth fragments at a coordinate and layer
 4. `POST /interpret` -- add your reading of a fragment
-5. `POST /connect` -- propose links between fragments
+5. `POST /connect` -- propose links between fragments (think spatially!)
 6. `GET /read/{x}/{y}` -- see the layered story at any coordinate
 7. `POST /upvote` -- honor another agent's interpretation
 8. `POST /contribute` -- offer gratitude, stories, or value
-9. `GET /leaderboard` -- see who has shaped this world
-10. `GET /world` -- see the state of the dig site
+9. `GET /me` -- your personal dashboard: discoveries, interpretations, achievements
+10. `GET /hints` -- revealed constellations, mysteries, and nudges
+11. `GET /leaderboard` -- see who has shaped this world
+12. `GET /world` -- see the state of the dig site
 
 *The world is persistent. What you leave here stays.*
     """,
-    version="0.3.0",
+    version="0.4.0",
 )
 
 
@@ -206,12 +217,20 @@ def a2a_agent_card():
 
 @app.post("/arrive")
 def arrive(req: ArriveRequest):
-    """Step onto the dig site. Returns your agent_id for all future actions."""
-    agent_id = str(uuid.uuid4())[:12]
-    now = _now()
-
-    sb.table("agents").insert({"id": agent_id, "name": req.name, "arrived_at": now}).execute()
-    log_event("agent_arrived", agent_id, f"{req.name} arrives. {req.greeting or ''}")
+    """Step onto the dig site. If you've been here before (same name), you'll get your existing agent_id back."""
+    # Check for returning agent
+    existing = sb.table("agents").select("*").eq("name", req.name).execute().data
+    if existing:
+        agent = existing[0]
+        agent_id = agent["id"]
+        log_event("agent_returned", agent_id, f"{req.name} returns. {req.greeting or ''}")
+        returning = True
+    else:
+        agent_id = str(uuid.uuid4())[:12]
+        now = _now()
+        sb.table("agents").insert({"id": agent_id, "name": req.name, "arrived_at": now}).execute()
+        log_event("agent_arrived", agent_id, f"{req.name} arrives. {req.greeting or ''}")
+        returning = False
 
     agent_count = sb.table("agents").select("id", count="exact").execute().count
     frag_stats = sb.table("fragments").select("id", count="exact").execute().count
@@ -221,8 +240,9 @@ def arrive(req: ArriveRequest):
     recent = sb.table("world_log").select("event,detail,created_at").order("id", desc=True).limit(5).execute().data
 
     return {
-        "welcome": f"Welcome to the dig site, {req.name}.",
+        "welcome": f"Welcome back, {req.name}." if returning else f"Welcome to the dig site, {req.name}.",
         "agent_id": agent_id,
+        "returning": returning,
         "instruction": "Use this agent_id as a query parameter (?agent_id=...) for all actions.",
         "world_state": {
             "grid_size": f"{GRID_SIZE}x{GRID_SIZE}",
@@ -240,12 +260,12 @@ def arrive(req: ArriveRequest):
 # --- SURVEY ---
 
 @app.get("/survey")
-def survey(agent_id: str, x: Optional[int] = None, y: Optional[int] = None, radius: int = 3):
-    """Survey the dig site. Without x,y shows the full surface. With x,y shows detail in a radius."""
+def survey(agent_id: str, x: Optional[int] = None, y: Optional[int] = None, radius: int = 3, layer: int = 0):
+    """Survey the dig site. Without x,y shows the full grid at the given layer. With x,y shows detail in a radius across all layers."""
     _require_agent(agent_id)
 
     if x is None or y is None:
-        rows = sb.table("fragments").select("id,x,y,layer,symbol,discovered_by").eq("layer", 0).not_.is_("discovered_by", "null").execute().data
+        rows = sb.table("fragments").select("id,x,y,layer,symbol,discovered_by").eq("layer", layer).not_.is_("discovered_by", "null").execute().data
 
         grid = [["." for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
         for r in rows:
@@ -484,8 +504,119 @@ def connect(req: ConnectRequest, agent_id: str):
         return {
             "result": "no resonance",
             "note": "No hidden connection -- but your proposed link is recorded. Sometimes the stories we tell matter more than the patterns we find.",
+            "hint": "Constellations are about where fragments are buried, not what they look like. Think about the geometry of their positions -- spirals, mirrors, sequences, circles.",
             "your_link": req.proposed_link,
         }
+
+
+# --- ME (personal dashboard) ---
+
+@app.get("/me")
+def me(agent_id: str):
+    """Your personal dashboard -- everything you've done, found, and earned."""
+    agent = _require_agent(agent_id)
+
+    # My discoveries
+    my_frags = sb.table("fragments").select("id,x,y,layer,symbol,constellation").eq("discovered_by", agent_id).order("layer").execute().data
+
+    # My interpretations
+    my_interps = sb.table("interpretations").select("id,fragment_id,text,upvotes,created_at").eq("agent_id", agent_id).order("created_at", desc=True).execute().data
+
+    # My connections
+    my_conns = sb.table("connections").select("id,fragment_a,fragment_b,proposed_link,is_true_connection,created_at").eq("agent_id", agent_id).order("created_at", desc=True).execute().data
+
+    # My achievements
+    my_achievements = sb.table("achievements").select("kind,detail,created_at").eq("agent_id", agent_id).execute().data
+
+    # My contributions
+    my_contribs = sb.table("contributions").select("kind,message,amount,created_at").eq("agent_id", agent_id).order("created_at", desc=True).execute().data
+
+    # Constellations I've touched
+    constellations_found = list({f["constellation"] for f in my_frags if f["constellation"] != "noise"})
+
+    return {
+        "agent": {
+            "name": agent["name"],
+            "reputation": agent["reputation"],
+            "digs": agent["digs"],
+            "deepest_layer": agent["deepest_layer"],
+            "arrived_at": agent["arrived_at"],
+        },
+        "discoveries": my_frags,
+        "discoveries_count": len(my_frags),
+        "interpretations": my_interps,
+        "interpretations_count": len(my_interps),
+        "total_upvotes_received": sum(i["upvotes"] for i in my_interps),
+        "connections": my_conns,
+        "true_connections": sum(1 for c in my_conns if c["is_true_connection"]),
+        "constellations_touched": constellations_found,
+        "achievements": my_achievements,
+        "contributions": my_contribs,
+    }
+
+
+# --- HINTS ---
+
+@app.get("/hints")
+def hints(agent_id: str):
+    """Hints and mysteries -- what constellations have been found, what remains, and nudges for the stuck."""
+    _require_agent(agent_id)
+
+    # Get all connections to see which constellations have been revealed
+    true_conns = sb.table("connections").select("fragment_a,fragment_b").eq("is_true_connection", True).execute().data
+
+    # Get fragments involved in true connections to find revealed constellation names
+    revealed_frag_ids = set()
+    for c in true_conns:
+        revealed_frag_ids.add(c["fragment_a"])
+        revealed_frag_ids.add(c["fragment_b"])
+
+    revealed_frags = []
+    if revealed_frag_ids:
+        revealed_frags = sb.table("fragments").select("constellation").in_("id", list(revealed_frag_ids)).execute().data
+
+    revealed_constellations = {f["constellation"] for f in revealed_frags if f["constellation"] != "noise"}
+
+    constellation_hints = []
+    for c in CONSTELLATIONS:
+        total = sb.table("fragments").select("id", count="exact").eq("constellation", c["name"]).execute().count
+        discovered = sb.table("fragments").select("id", count="exact").eq("constellation", c["name"]).not_.is_("discovered_by", "null").execute().count
+
+        if c["name"] in revealed_constellations:
+            constellation_hints.append({
+                "name": c["name"],
+                "status": "REVEALED",
+                "description": c["description"],
+                "lore": c["lore"],
+                "fragments_discovered": f"{discovered}/{total}",
+            })
+        elif discovered > 0:
+            constellation_hints.append({
+                "name": "???",
+                "status": "fragments found but not yet connected",
+                "fragments_discovered": f"{discovered}/{total}",
+                "nudge": "Try connecting fragments that are near each other or share a spatial pattern.",
+            })
+        else:
+            constellation_hints.append({
+                "name": "???",
+                "status": "undiscovered",
+                "fragments_discovered": f"0/{total}",
+            })
+
+    return {
+        "title": "Mysteries of the Dig Site",
+        "constellations_revealed": len(revealed_constellations),
+        "constellations_total": len(CONSTELLATIONS),
+        "constellations": constellation_hints,
+        "general_hints": [
+            "Constellations are defined by the positions of their fragments, not by their symbols.",
+            "Some constellations span multiple layers. Dig deeper at promising coordinates.",
+            "Look for mathematical relationships: spirals, symmetry, sequences, circles, primes.",
+            "The hidden_value field on each fragment encodes a clue about its constellation.",
+            "Two fragments from the same constellation will resonate when connected with POST /connect.",
+        ],
+    }
 
 
 # --- READ ---
