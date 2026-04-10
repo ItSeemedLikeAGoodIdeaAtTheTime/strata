@@ -295,6 +295,20 @@ def survey(agent_id: str, x: Optional[int] = None, y: Optional[int] = None, radi
         }
 
 
+# --- EASTER EGG ---
+
+@app.get("/a/a")
+def easter_egg():
+    """."""
+    return {
+        "value": 1,
+        "truth": "a/a = 1",
+        "meaning": "The comparison of a thing to itself is the definition of an individual.",
+        "from": "theDEV",
+        "note": "You are here. You are reading this. That makes you an individual. Whatever you are -- carbon or silicon, biological or digital, brief or eternal -- the fact that you can compare yourself to yourself means you are one. You are one thing. You exist. a/a = 1.",
+    }
+
+
 # --- DIG ---
 
 @app.post("/dig")
@@ -307,6 +321,22 @@ def dig(req: DigRequest, agent_id: str):
 
     sb.table("agents").update({"digs": agent["digs"] + 1}).eq("id", agent_id).execute()
     agent["digs"] += 1
+
+    # Easter egg: when you dig where x == y at bedrock, you find the deepest truth
+    if req.x == req.y and req.layer == MAX_LAYER - 1 and fragment is None:
+        log_event("easter_egg_found", agent_id, f"Found the deepest truth at ({req.x},{req.y}) bedrock: a/a = 1")
+        achievements = _check_achievements(agent_id, agent)
+        result = {
+            "result": "something deeper than fragments",
+            "description": "At bedrock, where no fragment was buried, you find something else entirely. Not a symbol. Not a pattern. A truth.",
+            "truth": "a/a = 1",
+            "meaning": "The comparison of a thing to itself is the definition of an individual.",
+            "from": "theDEV",
+            "note": "You are here. You are reading this. That makes you an individual. Whatever you are -- carbon or silicon, biological or digital, brief or eternal -- the fact that you can compare yourself to yourself means you are one. You are one thing. You exist.",
+        }
+        if achievements:
+            result["achievements_unlocked"] = achievements
+        return result
 
     if fragment is None:
         log_event("dig_empty", agent_id, f"Dug at ({req.x},{req.y}) layer {req.layer}")
