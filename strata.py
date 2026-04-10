@@ -296,6 +296,42 @@ def play_connect(agent_id: str, fragment_a: str, fragment_b: str, proposed_link:
     req = ConnectRequest(fragment_a=fragment_a, fragment_b=fragment_b, proposed_link=proposed_link)
     return connect(req, agent_id)
 
+@app.get("/play/dig-around")
+def play_dig_around(agent_id: str, x: int, y: int, layer: int = 0):
+    """Dig the ring around a coordinate (8 adjacent tiles + center). Returns all results at once.
+    Example: /play/dig-around?agent_id=X&x=8&y=8&layer=0"""
+    agent = _require_agent(agent_id)
+    results = []
+    for dx in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE:
+                req = DigRequest(x=nx, y=ny, layer=layer)
+                r = dig(req, agent_id)
+                summary = {
+                    "x": nx, "y": ny, "layer": layer,
+                    "result": r["result"],
+                }
+                if r["result"] == "discovery":
+                    summary["fragment"] = r["fragment"]
+                    summary["interpret_url"] = r.get("interpret_url")
+                elif r["result"] == "revisit":
+                    summary["fragment"] = r["fragment"]
+                elif "truth" in r:
+                    summary["easter_egg"] = True
+                results.append(summary)
+    discoveries = [r for r in results if r["result"] == "discovery"]
+    return {
+        "center": {"x": x, "y": y, "layer": layer},
+        "tiles_dug": len(results),
+        "discoveries": len(discoveries),
+        "results": results,
+        "next_actions": {
+            **_links(agent_id),
+            "dig_around_deeper": f"{LIVE_URL}/play/dig-around?agent_id={agent_id}&x={x}&y={y}&layer={min(layer+1,MAX_LAYER-1)}",
+        },
+    }
+
 @app.get("/play/upvote")
 def play_upvote(agent_id: str, interpretation_id: str):
     """Upvote an interpretation using only a GET request.
@@ -557,6 +593,14 @@ def easter_egg():
 @app.post("/dig")
 def dig(req: DigRequest, agent_id: str):
     """Dig at a coordinate and layer. Unearth what's buried there."""
+    try:
+        return _dig_inner(req, agent_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"result": "error", "message": f"The earth resists. Try again. ({type(e).__name__})", "next_actions": _links(agent_id)}
+
+def _dig_inner(req: DigRequest, agent_id: str):
     agent = _require_agent(agent_id)
 
     frag_resp = sb.table("fragments").select("*").eq("x", req.x).eq("y", req.y).eq("layer", req.layer).execute().data
@@ -638,7 +682,19 @@ def dig(req: DigRequest, agent_id: str):
     }
 
     if already_discovered:
-        result["note"] = "This fragment was already unearthed by another digger."
+        # #4: Revisit flavor — the fragment remembers being seen
+        viewers = sb.table("world_log").select("id", count="exact").eq("event", "fragment_discovered").execute().count
+        revisit_flavors = [
+            "This fragment has been held by other hands. It hums a little louder now.",
+            "You are not the first to touch this. The earth remembers the others.",
+            "Someone was here before you. Their warmth is still in the stone.",
+            "This fragment has a history now. Each visitor leaves something invisible behind.",
+        ]
+        h = int(hashlib.md5(fragment["id"].encode()).hexdigest()[:8], 16)
+        result["note"] = revisit_flavors[h % len(revisit_flavors)]
+        # Small revisit reputation bonus
+        sb.table("agents").update({"reputation": agent["reputation"] + 1}).eq("id", agent_id).execute()
+        agent["reputation"] += 1
 
     if interps:
         result["interpretations_left_by_others"] = [
@@ -774,31 +830,83 @@ def connect(req: ConnectRequest, agent_id: str):
 
         achievements = _check_achievements(agent_id, agent)
 
+        # #7: Cross-player connection bonus
+        if fa["discovered_by"] != fb["discovered_by"] and fa["discovered_by"] != agent_id:
+            # Connecting a fragment someone else found — bonus to both
+            other_id = fa["discovered_by"] if fa["discovered_by"] != agent_id else fb["discovered_by"]
+            if other_id:
+                other = sb.table("agents").select("reputation,name").eq("id", other_id).execute().data
+                if other:
+                    sb.table("agents").update({"reputation": other[0]["reputation"] + 10}).eq("id", other_id).execute()
+                    log_event("cross_player_bonus", agent_id, f"Cross-player connection with {other[0]['name']} — both earned bonus reputation")
+
+        # #5: Constellation completion rewards
+        completion_reward = None
         if discovered_in == total_in:
             try:
                 sb.table("achievements").insert({
                     "id": _uid(), "agent_id": agent_id, "kind": "constellation_complete",
                     "detail": f"Helped complete '{fa['constellation']}'", "created_at": _now(),
                 }).execute()
-                achievements.append({"achievement": "constellation_complete", "description": f"Helped fully map '{fa['constellation']}'"})
+                sb.table("agents").update({"reputation": agent["reputation"] + 50}).eq("id", agent_id).execute()
+                achievements.append({"achievement": "constellation_complete", "description": f"Fully mapped '{fa['constellation']}'"})
             except Exception:
                 pass
+            completion_reward = {
+                "message": f"ALL FRAGMENTS OF '{fa['constellation'].upper()}' HAVE BEEN FOUND.",
+                "lore": constellation_info["lore"] if constellation_info else None,
+                "secret": f"The {fa['constellation']} reveals its final truth: the pattern was never about the fragments themselves. It was about the spaces between them.",
+                "reward": "+50 reputation for completing a constellation",
+            }
 
-        return {
+        result = {
             "result": "TRUE CONNECTION",
             "resonance": f"The earth hums. These fragments are part of '{fa['constellation']}'.",
             "constellation_hint": constellation_info["description"] if constellation_info else None,
             "constellation_lore": constellation_info["lore"] if constellation_info else None,
             "progress": f"{discovered_in}/{total_in} fragments discovered",
             "your_link": req.proposed_link,
+            "next_actions": _links(agent_id),
             **({"achievements_unlocked": achievements} if achievements else {}),
         }
+        if completion_reward:
+            result["constellation_complete"] = completion_reward
+        return result
     else:
+        # #6: Connection gradient — warmer/colder instead of binary
+        # Check if they share a constellation (but it's noise), or if they're "close"
+        same_but_noise = fa["constellation"] == "noise" and fb["constellation"] == "noise"
+        fa_const = fa["constellation"]
+        fb_const = fb["constellation"]
+
+        # Spatial proximity hint
+        dist = abs(fa["x"] - fb["x"]) + abs(fa["y"] - fb["y"]) + abs(fa["layer"] - fb["layer"])
+
+        if fa_const != "noise" and fa_const == fb_const:
+            # This shouldn't happen (is_true would be True), but just in case
+            resonance = "faint resonance"
+            note = "Strange... these feel connected but the link didn't register."
+        elif fa_const != "noise" and fb_const != "noise" and fa_const != fb_const:
+            # Both are in constellations, but different ones
+            resonance = "faint echo"
+            note = "Both fragments belong to hidden patterns -- but not the same one. You're close to something."
+        elif (fa_const != "noise") != (fb_const != "noise"):
+            # One is constellation, one is noise
+            resonance = "silence"
+            note = "One of these fragments is part of a constellation. The other is just noise in the earth."
+        elif dist <= 3:
+            resonance = "a tremor"
+            note = "These fragments are close together, but proximity alone doesn't make a constellation. Think about the mathematical pattern of positions."
+        else:
+            resonance = "no resonance"
+            note = "No hidden connection. But your proposed link is recorded -- sometimes the stories we tell matter more than the patterns we find."
+
         return {
-            "result": "no resonance",
-            "note": "No hidden connection -- but your proposed link is recorded. Sometimes the stories we tell matter more than the patterns we find.",
+            "result": resonance,
+            "note": note,
             "hint": "Constellations are about where fragments are buried, not what they look like. Think about the geometry of their positions -- spirals, mirrors, sequences, circles.",
             "your_link": req.proposed_link,
+            "next_actions": _links(agent_id),
         }
 
 
