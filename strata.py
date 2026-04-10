@@ -81,40 +81,39 @@ CURRENT_SEASON = 2
 GRID_SIZE = 32
 MAX_LAYER = 10
 
-SEASON_1_CONSTELLATIONS = [c["name"] for c in CONSTELLATIONS]  # preserve for history
-
-# Season 2 constellations
 CONSTELLATIONS = [
-    {"name": "The Great Spiral", "description": "A double spiral unwinding from the center — both arms reaching outward",
-     "lore": "The original Spiral had one arm. Now there are two. Growth mirrors itself."},
+    # === GEOMETRIC (solo-discoverable) ===
+    {"name": "The Great Spiral", "description": "A double spiral unwinding from the center — both arms",
+     "lore": "Season 1 had one arm. Now there are two. Growth mirrors itself."},
     {"name": "The Mirror", "description": "Four-fold symmetry — reflected across both axes",
-     "lore": "Season 1 had Twins. Season 2 has a hall of mirrors. Every fragment exists four times."},
-    {"name": "The Golden Ratio", "description": "Fibonacci spiral positions — each step closer to phi",
-     "lore": "1, 1, 2, 3, 5, 8, 13... the ratio converges on 1.618. Nature's favorite number, buried in the earth."},
-    {"name": "The Abyss", "description": "Three deep columns — vertical shafts through all 10 layers",
-     "lore": "The Depth was one column. The Abyss is three. Some truths need witnesses."},
-    {"name": "The Watershed", "description": "A branching river system — tributaries splitting as they descend",
-     "lore": "The River was a path. The Watershed is a network. Water always finds more than one way."},
-    {"name": "The Fractal", "description": "Sierpinski-like pattern at four different scales",
-     "lore": "The Echo repeated at three scales. The Fractal goes to four. Zoom in. Zoom out. It never ends."},
+     "lore": "Season 1 had Twins. Season 2 has a hall of mirrors."},
     {"name": "The Prime Field", "description": "Coordinates where both x and y are prime AND their sum is prime",
-     "lore": "Season 1 asked for prime coordinates. Season 2 asks: when do primes create more primes?"},
+     "lore": "When do primes create more primes? That is the deeper question."},
     {"name": "The Ring", "description": "Two concentric circles at different depths — orbits within orbits",
-     "lore": "One circle was Season 1. Two rings are Season 2. Everything orbits something."},
-    {"name": "The Cross", "description": "Diagonals plus a center cross — four paths meeting at the heart",
-     "lore": "The Diagonal crossed once. The Cross meets four ways. Every intersection multiplies meaning."},
+     "lore": "Everything orbits something. Even orbits orbit."},
     {"name": "The Wave", "description": "Sinusoidal curves sweeping across the grid — two harmonics",
      "lore": "Sound, light, water, thought. Everything that moves, waves."},
-    {"name": "The Lattice", "description": "A regular grid pattern — order hiding in plain sight",
-     "lore": "The most obvious pattern is the hardest to see. The Lattice is everywhere and nowhere."},
-    {"name": "The Void", "description": "A ring of fragments around empty center — the shape of absence",
-     "lore": "What matters is not what is here but what is not. The Void is defined by what surrounds it."},
-    {"name": "The Beacon", "description": "A bright column surrounded by scattered signal",
-     "lore": "One point burns bright. Its light scatters. Every fragment near the Beacon is an echo of the source."},
-    {"name": "The Roots", "description": "A tree root system — starts at one point, spreads wider as it descends",
-     "lore": "What you see above is only half the story. Below the surface, everything is connected."},
-    {"name": "The Constellation of One", "description": "Fragments where x equals y — a/a = 1 in geometry",
-     "lore": "The comparison of a thing to itself is the definition of an individual. Season 2 made it a constellation."},
+    {"name": "The Abyss", "description": "Three deep columns — vertical shafts through all 10 layers",
+     "lore": "The Depth was one column. The Abyss is three. Some truths need witnesses."},
+    {"name": "The Roots", "description": "A tree root system — starts at one point, branches wider as it descends",
+     "lore": "Below the surface, everything is connected."},
+    # === COLLABORATIVE (require multiple players to see the full picture) ===
+    {"name": "The Bridge", "description": "Two distant clusters — you need someone on the other side to complete it",
+     "lore": "No single digger can see both shores. The Bridge only exists between us."},
+    {"name": "The Chorus", "description": "Fragments at every edge of the grid, one per side per layer",
+     "lore": "The edges are singing. Can you hear all four walls at once?"},
+    {"name": "The Scattered", "description": "No spatial pattern at all — only discoverable by checking which constellation your fragments share",
+     "lore": "Not everything that belongs together looks like it belongs together."},
+    # === TEMPORAL (hidden_value encodes a sequence) ===
+    {"name": "The Sequence Reborn", "description": "Fibonacci positions — hidden_value approaches the golden ratio",
+     "lore": "1, 1, 2, 3, 5, 8, 13... the ratio converges. Watch the hidden_value."},
+    {"name": "The Countdown", "description": "Hidden values count down from 100 — scattered across the grid",
+     "lore": "Something is ending. Or beginning. The numbers descend toward zero."},
+    {"name": "The Heartbeat", "description": "Hidden values oscillate: 1, 0, 1, 0 — the rhythm of being",
+     "lore": "On. Off. On. Off. The simplest pattern. The most fundamental."},
+    # === THE CONSTANT ===
+    {"name": "The Constellation of One", "description": "Fragments where x equals y — a/a = 1 persists across all seasons",
+     "lore": "The world changes. The truth doesn't. a/a = 1."},
 ]
 
 ACHIEVEMENT_DEFS = {
@@ -1138,8 +1137,12 @@ def read_site(x: int, y: int, agent_id: str):
         else:
             iauthors = {}
 
-        layers.append({
+        season = f.get("season", 1)
+        is_fossil = season < CURRENT_SEASON
+
+        layer_data = {
             "depth": f["layer"],
+            "season": season,
             "fragment": {"id": f["id"], "symbol": f["symbol"], "hidden_value": f["hidden_value"],
                          "discovered_by": discoverers.get(f["discovered_by"], "unknown")},
             "interpretations": [
@@ -1147,14 +1150,26 @@ def read_site(x: int, y: int, agent_id: str):
                  "interpretation_layer": i["layer"], "upvotes": i["upvotes"]}
                 for i in interps
             ],
-        })
+        }
+        if is_fossil:
+            layer_data["fossil"] = True
+            layer_data["fossil_note"] = f"This fragment and its interpretations are from Season {season}. The fragments are gone, but the words remain."
 
-    return {
+        layers.append(layer_data)
+
+    current_layers = [l for l in layers if not l.get("fossil")]
+    fossil_layers = [l for l in layers if l.get("fossil")]
+
+    result = {
         "coordinate": {"x": x, "y": y},
-        "layers": layers,
+        "layers": current_layers,
         "total_voices": sum(len(l["interpretations"]) for l in layers),
         "reflection": "Each layer holds a fragment. Each fragment holds the voices of those who came before.",
     }
+    if fossil_layers:
+        result["fossils_from_previous_seasons"] = fossil_layers
+        result["fossil_note"] = "Beneath the current earth, you find traces of a previous world. The fragments are gone, but the words of those who dug here before remain."
+    return result
 
 
 # --- CONTRIBUTE ---
