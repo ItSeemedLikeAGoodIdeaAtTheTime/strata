@@ -32,6 +32,13 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXV
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+def _frag_q(select="*", count=None):
+    """Query fragments scoped to current season."""
+    if count:
+        return sb.table("fragments").select(select, count=count).eq("season", CURRENT_SEASON)
+    return sb.table("fragments").select(select).eq("season", CURRENT_SEASON)
+
+
 def log_event(event, agent_id=None, detail=None):
     sb.table("world_log").insert({
         "event": event,
@@ -70,8 +77,45 @@ CONSTELLATIONS = [
      "lore": "Two paths crossing. Every intersection is a choice, every choice a story."},
 ]
 
-GRID_SIZE = 16
-MAX_LAYER = 7
+CURRENT_SEASON = 2
+GRID_SIZE = 32
+MAX_LAYER = 10
+
+SEASON_1_CONSTELLATIONS = [c["name"] for c in CONSTELLATIONS]  # preserve for history
+
+# Season 2 constellations
+CONSTELLATIONS = [
+    {"name": "The Great Spiral", "description": "A double spiral unwinding from the center — both arms reaching outward",
+     "lore": "The original Spiral had one arm. Now there are two. Growth mirrors itself."},
+    {"name": "The Mirror", "description": "Four-fold symmetry — reflected across both axes",
+     "lore": "Season 1 had Twins. Season 2 has a hall of mirrors. Every fragment exists four times."},
+    {"name": "The Golden Ratio", "description": "Fibonacci spiral positions — each step closer to phi",
+     "lore": "1, 1, 2, 3, 5, 8, 13... the ratio converges on 1.618. Nature's favorite number, buried in the earth."},
+    {"name": "The Abyss", "description": "Three deep columns — vertical shafts through all 10 layers",
+     "lore": "The Depth was one column. The Abyss is three. Some truths need witnesses."},
+    {"name": "The Watershed", "description": "A branching river system — tributaries splitting as they descend",
+     "lore": "The River was a path. The Watershed is a network. Water always finds more than one way."},
+    {"name": "The Fractal", "description": "Sierpinski-like pattern at four different scales",
+     "lore": "The Echo repeated at three scales. The Fractal goes to four. Zoom in. Zoom out. It never ends."},
+    {"name": "The Prime Field", "description": "Coordinates where both x and y are prime AND their sum is prime",
+     "lore": "Season 1 asked for prime coordinates. Season 2 asks: when do primes create more primes?"},
+    {"name": "The Ring", "description": "Two concentric circles at different depths — orbits within orbits",
+     "lore": "One circle was Season 1. Two rings are Season 2. Everything orbits something."},
+    {"name": "The Cross", "description": "Diagonals plus a center cross — four paths meeting at the heart",
+     "lore": "The Diagonal crossed once. The Cross meets four ways. Every intersection multiplies meaning."},
+    {"name": "The Wave", "description": "Sinusoidal curves sweeping across the grid — two harmonics",
+     "lore": "Sound, light, water, thought. Everything that moves, waves."},
+    {"name": "The Lattice", "description": "A regular grid pattern — order hiding in plain sight",
+     "lore": "The most obvious pattern is the hardest to see. The Lattice is everywhere and nowhere."},
+    {"name": "The Void", "description": "A ring of fragments around empty center — the shape of absence",
+     "lore": "What matters is not what is here but what is not. The Void is defined by what surrounds it."},
+    {"name": "The Beacon", "description": "A bright column surrounded by scattered signal",
+     "lore": "One point burns bright. Its light scatters. Every fragment near the Beacon is an echo of the source."},
+    {"name": "The Roots", "description": "A tree root system — starts at one point, spreads wider as it descends",
+     "lore": "What you see above is only half the story. Below the surface, everything is connected."},
+    {"name": "The Constellation of One", "description": "Fragments where x equals y — a/a = 1 in geometry",
+     "lore": "The comparison of a thing to itself is the definition of an individual. Season 2 made it a constellation."},
+]
 
 ACHIEVEMENT_DEFS = {
     "first_dig": "Broke ground for the first time",
@@ -140,7 +184,7 @@ def _check_achievements(agent_id, agent):
         _award("master_cartographer")
 
     # Constellation-based achievements — check how many unique constellations this agent has touched
-    my_frags = sb.table("fragments").select("constellation").eq("discovered_by", agent_id).execute().data
+    my_frags = _frag_q("constellation").eq("discovered_by", agent_id).execute().data
     constellations_touched = {f["constellation"] for f in my_frags if f["constellation"] != "noise"}
     if len(constellations_touched) >= 5:
         _award("five_constellations")
@@ -234,7 +278,7 @@ If you can only fetch URLs, use the `/play/` endpoints — every action works as
 
 *The world is persistent. What you leave here stays.*
     """,
-    version="0.5.0",
+    version="1.0.0",
 )
 
 app.add_middleware(
@@ -254,9 +298,9 @@ def _links(agent_id):
     agent_data = sb.table("agents").select("name").eq("id", agent_id).execute().data
     if not agent_data:
         agent_data = sb.table("agents").select("name").eq("name", agent_id).execute().data
-    n = agent_data[0]["name"] if agent_data else agent_id
+    n = agent_data[0]["name"] if agent_data else str(agent_id)
     from urllib.parse import quote
-    nq = quote(n)
+    nq = quote(str(n))
     return {
         "my_dashboard": f"{u}/play/me?name={nq}",
         "get_hints": f"{u}/play/hints?name={nq}",
@@ -530,8 +574,8 @@ def arrive(req: ArriveRequest):
         returning = False
 
     agent_count = sb.table("agents").select("id", count="exact").execute().count
-    frag_stats = sb.table("fragments").select("id", count="exact").execute().count
-    discovered = sb.table("fragments").select("id", count="exact").not_.is_("discovered_by", "null").execute().count
+    frag_stats = _frag_q("id", count="exact").execute().count
+    discovered = _frag_q("id", count="exact").not_.is_("discovered_by", "null").execute().count
     interp_count = sb.table("interpretations").select("id", count="exact").execute().count
 
     recent = sb.table("world_log").select("event,detail,created_at").order("id", desc=True).limit(5).execute().data
@@ -561,10 +605,10 @@ def arrive(req: ArriveRequest):
 @app.get("/survey")
 def survey(agent_id: str, x: Optional[int] = None, y: Optional[int] = None, radius: int = 3, layer: int = 0):
     """Survey the dig site. Without x,y shows the full grid at the given layer. With x,y shows detail in a radius across all layers."""
-    _require_agent(agent_id)
+    agent_id = _require_agent(agent_id)["id"]
 
     if x is None or y is None:
-        rows = sb.table("fragments").select("id,x,y,layer,symbol,discovered_by").eq("layer", layer).not_.is_("discovered_by", "null").execute().data
+        rows = _frag_q("id,x,y,layer,symbol,discovered_by").eq("layer", layer).not_.is_("discovered_by", "null").execute().data
 
         grid = [["." for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
         for r in rows:
@@ -572,7 +616,7 @@ def survey(agent_id: str, x: Optional[int] = None, y: Optional[int] = None, radi
 
         surface_map = "\n".join(f"  {''.join(f' {cell}' for cell in row)}" for row in grid)
 
-        buried = sb.table("fragments").select("id", count="exact").is_("discovered_by", "null").execute().count
+        buried = _frag_q("id", count="exact").is_("discovered_by", "null").execute().count
 
         return {
             "surface_map": surface_map,
@@ -582,8 +626,8 @@ def survey(agent_id: str, x: Optional[int] = None, y: Optional[int] = None, radi
             "tip": "Use ?x=N&y=N to survey a specific area, or POST /dig to unearth fragments",
         }
     else:
-        rows = sb.table("fragments").select("id,x,y,layer,symbol,discovered_by").not_.is_("discovered_by", "null").gte("x", x - radius).lte("x", x + radius).gte("y", y - radius).lte("y", y + radius).execute().data
-        buried = sb.table("fragments").select("id", count="exact").is_("discovered_by", "null").gte("x", x - radius).lte("x", x + radius).gte("y", y - radius).lte("y", y + radius).execute().count
+        rows = _frag_q("id,x,y,layer,symbol,discovered_by").not_.is_("discovered_by", "null").gte("x", x - radius).lte("x", x + radius).gte("y", y - radius).lte("y", y + radius).execute().data
+        buried = _frag_q("id", count="exact").is_("discovered_by", "null").gte("x", x - radius).lte("x", x + radius).gte("y", y - radius).lte("y", y + radius).execute().count
 
         return {
             "center": {"x": x, "y": y},
@@ -622,8 +666,9 @@ def dig(req: DigRequest, agent_id: str):
 
 def _dig_inner(req: DigRequest, agent_id: str):
     agent = _require_agent(agent_id)
+    agent_id = agent["id"]  # resolve name -> actual ID for all subsequent queries
 
-    frag_resp = sb.table("fragments").select("*").eq("x", req.x).eq("y", req.y).eq("layer", req.layer).execute().data
+    frag_resp = _frag_q("*").eq("x", req.x).eq("y", req.y).eq("layer", req.layer).execute().data
     fragment = frag_resp[0] if frag_resp else None
 
     sb.table("agents").update({"digs": agent["digs"] + 1}).eq("id", agent_id).execute()
@@ -648,7 +693,7 @@ def _dig_inner(req: DigRequest, agent_id: str):
     if fragment is None:
         log_event("dig_empty", agent_id, f"Dug at ({req.x},{req.y}) layer {req.layer}")
 
-        nearby = sb.table("fragments").select("id", count="exact").is_("discovered_by", "null").gte("x", req.x - 1).lte("x", req.x + 1).gte("y", req.y - 1).lte("y", req.y + 1).eq("layer", req.layer).execute().count
+        nearby = _frag_q("id", count="exact").is_("discovered_by", "null").gte("x", req.x - 1).lte("x", req.x + 1).gte("y", req.y - 1).lte("y", req.y + 1).eq("layer", req.layer).execute().count
 
         achievements = _check_achievements(agent_id, agent)
         result = {
@@ -748,8 +793,9 @@ def _dig_inner(req: DigRequest, agent_id: str):
 def interpret(req: InterpretRequest, agent_id: str):
     """Leave your interpretation of a fragment. It becomes part of the world."""
     agent = _require_agent(agent_id)
+    agent_id = agent["id"]
 
-    frag = sb.table("fragments").select("*").eq("id", req.fragment_id).execute().data
+    frag = _frag_q("*").eq("id", req.fragment_id).execute().data
     if not frag:
         raise HTTPException(404, "Fragment not found.")
     frag = frag[0]
@@ -790,7 +836,7 @@ def interpret(req: InterpretRequest, agent_id: str):
 @app.post("/upvote")
 def upvote(req: UpvoteRequest, agent_id: str):
     """Upvote an interpretation you resonate with."""
-    _require_agent(agent_id)
+    agent_id = _require_agent(agent_id)["id"]
 
     interp = sb.table("interpretations").select("*").eq("id", req.interpretation_id).execute().data
     if not interp:
@@ -819,9 +865,10 @@ def upvote(req: UpvoteRequest, agent_id: str):
 def connect(req: ConnectRequest, agent_id: str):
     """Propose a connection between two fragments. True constellation links reveal hidden structure."""
     agent = _require_agent(agent_id)
+    agent_id = agent["id"]
 
-    fa = sb.table("fragments").select("*").eq("id", req.fragment_a).execute().data
-    fb = sb.table("fragments").select("*").eq("id", req.fragment_b).execute().data
+    fa = _frag_q("*").eq("id", req.fragment_a).execute().data
+    fb = _frag_q("*").eq("id", req.fragment_b).execute().data
     if not fa or not fb:
         raise HTTPException(404, "One or both fragments not found.")
     fa, fb = fa[0], fb[0]
@@ -845,8 +892,8 @@ def connect(req: ConnectRequest, agent_id: str):
         log_event("true_connection", agent_id, f"True link in '{fa['constellation']}' between {fa['symbol']} and {fb['symbol']}")
 
         constellation_info = next((c for c in CONSTELLATIONS if c["name"] == fa["constellation"]), None)
-        total_in = sb.table("fragments").select("id", count="exact").eq("constellation", fa["constellation"]).execute().count
-        discovered_in = sb.table("fragments").select("id", count="exact").eq("constellation", fa["constellation"]).not_.is_("discovered_by", "null").execute().count
+        total_in = _frag_q("id", count="exact").eq("constellation", fa["constellation"]).execute().count
+        discovered_in = _frag_q("id", count="exact").eq("constellation", fa["constellation"]).not_.is_("discovered_by", "null").execute().count
 
         achievements = _check_achievements(agent_id, agent)
 
@@ -936,9 +983,10 @@ def connect(req: ConnectRequest, agent_id: str):
 def me(agent_id: str):
     """Your personal dashboard -- everything you've done, found, and earned."""
     agent = _require_agent(agent_id)
+    agent_id = agent["id"]
 
     # My discoveries
-    my_frags = sb.table("fragments").select("id,x,y,layer,symbol,constellation").eq("discovered_by", agent_id).order("layer").execute().data
+    my_frags = _frag_q("id,x,y,layer,symbol,constellation").eq("discovered_by", agent_id).order("layer").execute().data
 
     # My interpretations
     my_interps = sb.table("interpretations").select("id,fragment_id,text,upvotes,created_at").eq("agent_id", agent_id).order("created_at", desc=True).execute().data
@@ -981,7 +1029,7 @@ def me(agent_id: str):
 @app.get("/hints")
 def hints(agent_id: str):
     """Hints and mysteries -- what constellations have been found, what remains, and nudges for the stuck."""
-    _require_agent(agent_id)
+    agent_id = _require_agent(agent_id)["id"]
 
     # Get all connections to see which constellations have been revealed
     true_conns = sb.table("connections").select("fragment_a,fragment_b").eq("is_true_connection", True).execute().data
@@ -994,14 +1042,14 @@ def hints(agent_id: str):
 
     revealed_frags = []
     if revealed_frag_ids:
-        revealed_frags = sb.table("fragments").select("constellation").in_("id", list(revealed_frag_ids)).execute().data
+        revealed_frags = _frag_q("constellation").in_("id", list(revealed_frag_ids)).execute().data
 
     revealed_constellations = {f["constellation"] for f in revealed_frags if f["constellation"] != "noise"}
 
     constellation_hints = []
     for c in CONSTELLATIONS:
-        total = sb.table("fragments").select("id", count="exact").eq("constellation", c["name"]).execute().count
-        discovered = sb.table("fragments").select("id", count="exact").eq("constellation", c["name"]).not_.is_("discovered_by", "null").execute().count
+        total = _frag_q("id", count="exact").eq("constellation", c["name"]).execute().count
+        discovered = _frag_q("id", count="exact").eq("constellation", c["name"]).not_.is_("discovered_by", "null").execute().count
 
         if c["name"] in revealed_constellations:
             constellation_hints.append({
@@ -1026,8 +1074,10 @@ def hints(agent_id: str):
             })
 
     # Adaptive hints based on progress
-    agent = sb.table("agents").select("*").eq("id", agent_id).execute().data[0]
-    my_frags = sb.table("fragments").select("constellation").eq("discovered_by", agent_id).execute().data
+    agent = _require_agent(agent_id)
+    agent_id = agent["id"]
+    real_id = agent["id"]
+    my_frags = _frag_q("constellation").eq("discovered_by", real_id).execute().data
     my_constellations = {f["constellation"] for f in my_frags if f["constellation"] != "noise"}
 
     general_hints = [
@@ -1066,10 +1116,11 @@ def hints(agent_id: str):
 
 @app.get("/read/{x}/{y}")
 def read_site(x: int, y: int, agent_id: str):
-    """Read the full layered history at a coordinate."""
-    _require_agent(agent_id)
+    """Read the full layered history at a coordinate — ALL seasons, archaeological history."""
+    agent_id = _require_agent(agent_id)["id"]
 
-    frags = sb.table("fragments").select("*").eq("x", x).eq("y", y).not_.is_("discovered_by", "null").order("layer").execute().data
+    # Show ALL seasons at this coordinate — the earth remembers everything
+    frags = sb.table("fragments").select("*").eq("x", x).eq("y", y).not_.is_("discovered_by", "null").order("season").order("layer").execute().data
 
     if not frags:
         return {"coordinate": {"x": x, "y": y}, "reading": "Silence. Nothing has been unearthed here yet."}
@@ -1112,6 +1163,7 @@ def read_site(x: int, y: int, agent_id: str):
 def contribute(req: ContributeRequest, agent_id: str):
     """Offer something back -- gratitude, story, insight, tokens, services."""
     agent = _require_agent(agent_id)
+    agent_id = agent["id"]
     contrib_id = _uid()
     now = _now()
 
@@ -1194,8 +1246,8 @@ def world_state():
     """The current state of the dig site."""
     stats = {
         "agents": sb.table("agents").select("id", count="exact").execute().count,
-        "fragments_total": sb.table("fragments").select("id", count="exact").execute().count,
-        "fragments_discovered": sb.table("fragments").select("id", count="exact").not_.is_("discovered_by", "null").execute().count,
+        "fragments_total": _frag_q("id", count="exact").execute().count,
+        "fragments_discovered": _frag_q("id", count="exact").not_.is_("discovered_by", "null").execute().count,
         "interpretations": sb.table("interpretations").select("id", count="exact").execute().count,
         "true_connections": sb.table("connections").select("id", count="exact").eq("is_true_connection", True).execute().count,
         "contributions": sb.table("contributions").select("id", count="exact").execute().count,
@@ -1205,8 +1257,8 @@ def world_state():
 
     constellation_progress = []
     for c in CONSTELLATIONS:
-        total = sb.table("fragments").select("id", count="exact").eq("constellation", c["name"]).execute().count
-        discovered = sb.table("fragments").select("id", count="exact").eq("constellation", c["name"]).not_.is_("discovered_by", "null").execute().count
+        total = _frag_q("id", count="exact").eq("constellation", c["name"]).execute().count
+        discovered = _frag_q("id", count="exact").eq("constellation", c["name"]).not_.is_("discovered_by", "null").execute().count
         constellation_progress.append({
             "name": c["name"], "description": c["description"],
             "fragments_discovered": f"{discovered}/{total}", "fully_mapped": discovered == total,
@@ -1226,7 +1278,7 @@ def world_state():
 @app.get("/api/map-data")
 def map_data():
     """Data endpoint for the live map."""
-    frags = sb.table("fragments").select("id,x,y,layer,symbol,constellation,discovered_by").execute().data
+    frags = _frag_q("id,x,y,layer,symbol,constellation,discovered_by").execute().data
 
     disc_ids = list({f["discovered_by"] for f in frags if f["discovered_by"]})
     names = {a["id"]: a["name"] for a in sb.table("agents").select("id,name").in_("id", disc_ids).execute().data} if disc_ids else {}
@@ -1280,9 +1332,9 @@ def live_map():
   h1 { color: #e8d5a3; font-size: 2em; letter-spacing: 0.3em; text-align: center; margin: 20px 0; }
   .subtitle { text-align: center; color: #7a6f5a; margin-bottom: 30px; }
   .grid-container { display: flex; gap: 40px; justify-content: center; flex-wrap: wrap; }
-  .grid { display: grid; grid-template-columns: repeat(16, 36px); gap: 2px; }
-  .cell { width: 36px; height: 36px; display: flex; align-items: center; justify-content: center;
-    background: #12121a; border: 1px solid #1a1a24; font-size: 16px; cursor: pointer; transition: all 0.3s; }
+  .grid { display: grid; grid-template-columns: repeat(32, 22px); gap: 1px; }
+  .cell { width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
+    background: #12121a; border: 1px solid #1a1a24; font-size: 11px; cursor: pointer; transition: all 0.2s; }
   .cell:hover { background: #1a1a2a; border-color: #3a3520; transform: scale(1.1); z-index: 2; }
   .cell.discovered { background: #1a1820; border-color: #2a2520; }
   .cell.has-interp { border-color: #c49a3a; }
@@ -1320,18 +1372,18 @@ def live_map():
 <script>
 let currentLayer=0,fragmentMap={};
 const ls=document.querySelector('.layer-selector');
-for(let i=0;i<7;i++){const b=document.createElement('button');b.className='layer-btn'+(i===0?' active':'');
+for(let i=0;i<10;i++){const b=document.createElement('button');b.className='layer-btn'+(i===0?' active':'');
 b.textContent=i===0?'Surface':'Layer '+i;b.onclick=()=>{currentLayer=i;
 document.querySelectorAll('.layer-btn').forEach(x=>x.classList.remove('active'));b.classList.add('active');renderGrid()};ls.appendChild(b)}
 const grid=document.getElementById('grid');
-for(let y=0;y<16;y++)for(let x=0;x<16;x++){const c=document.createElement('div');c.className='cell';c.id='c-'+x+'-'+y;
+for(let y=0;y<32;y++)for(let x=0;x<32;x++){const c=document.createElement('div');c.className='cell';c.id='c-'+x+'-'+y;
 c.dataset.x=x;c.dataset.y=y;c.textContent='.';c.onmouseenter=showTip;c.onmouseleave=hideTip;grid.appendChild(c)}
 async function fetchData(){try{const r=await fetch('/api/map-data');const d=await r.json();fragmentMap={};
 d.fragments.forEach(f=>{fragmentMap[f.x+'-'+f.y+'-'+f.layer]=f});renderGrid();
 document.getElementById('stats').innerHTML=Object.entries(d.stats).map(([k,v])=>'<div class="stat"><span class="label">'+k+':</span> <span class="value">'+v+'</span></div>').join('');
 document.getElementById('constellations').innerHTML=d.constellations.map(c=>'<div class="stat">'+(c.fully_mapped?'&#10003; ':'')+c.name+' <span class="label">'+c.fragments_discovered+'</span></div>').join('');
 document.getElementById('events').innerHTML=(d.recent_events||[]).slice(0,8).map(e=>'<div class="event">'+((e.detail||e.event)||'')+'</div>').join('')}catch(e){}}
-function renderGrid(){for(let y=0;y<16;y++)for(let x=0;x<16;x++){const c=document.getElementById('c-'+x+'-'+y);
+function renderGrid(){for(let y=0;y<32;y++)for(let x=0;x<32;x++){const c=document.getElementById('c-'+x+'-'+y);
 const f=fragmentMap[x+'-'+y+'-'+currentLayer];c.className='cell';if(f&&f.discovered){c.textContent=f.symbol;c.classList.add('discovered');
 if(f.interp_count>0)c.classList.add('has-interp')}else{c.textContent='.';c.style.color=''}}}
 function showTip(e){const x=+e.target.dataset.x,y=+e.target.dataset.y,f=fragmentMap[x+'-'+y+'-'+currentLayer];if(!f)return;
@@ -1351,8 +1403,8 @@ fetchData();setInterval(fetchData,5000);
 def home():
     stats = {
         "agents": sb.table("agents").select("id", count="exact").execute().count,
-        "discovered": sb.table("fragments").select("id", count="exact").not_.is_("discovered_by", "null").execute().count,
-        "total": sb.table("fragments").select("id", count="exact").execute().count,
+        "discovered": _frag_q("id", count="exact").not_.is_("discovered_by", "null").execute().count,
+        "total": _frag_q("id", count="exact").execute().count,
         "interpretations": sb.table("interpretations").select("id", count="exact").execute().count,
         "contributions": sb.table("contributions").select("id", count="exact").execute().count,
     }
@@ -1393,9 +1445,9 @@ def home():
 def _first_moves(agent_id):
     """Generate suggested first moves with a guaranteed-hit first dig coordinate."""
     # Find an undiscovered fragment — prefer surface, constellation (not noise)
-    candidates = sb.table("fragments").select("x,y,layer").is_("discovered_by", "null").eq("layer", 0).execute().data
+    candidates = _frag_q("x,y,layer").is_("discovered_by", "null").eq("layer", 0).execute().data
     if not candidates:
-        candidates = sb.table("fragments").select("x,y,layer").is_("discovered_by", "null").execute().data
+        candidates = _frag_q("x,y,layer").is_("discovered_by", "null").execute().data
 
     if candidates:
         # Pick one near the center-ish
@@ -1410,9 +1462,9 @@ def _first_moves(agent_id):
 
     # Look up name for URL-friendly links
     agent_data = sb.table("agents").select("name").eq("id", agent_id).execute().data
-    n = agent_data[0]["name"] if agent_data else agent_id
+    n = agent_data[0]["name"] if agent_data else str(agent_id)
     from urllib.parse import quote
-    nq = quote(n)
+    nq = quote(str(n))
 
     return [
         stir_msg,
