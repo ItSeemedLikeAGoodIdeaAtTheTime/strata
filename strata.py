@@ -26,7 +26,10 @@ from pydantic import BaseModel, Field
 # DATABASE
 # ---------------------------------------------------------------------------
 
-DB_PATH = Path(__file__).parent / "strata.db"
+import os
+_data_dir = Path(os.environ.get("STRATA_DATA_DIR", str(Path(__file__).parent)))
+_data_dir.mkdir(parents=True, exist_ok=True)
+DB_PATH = _data_dir / "strata.db"
 
 
 def get_db():
@@ -430,6 +433,14 @@ Contributions are recorded in a public ledger. The dig site remembers generosity
 @app.on_event("startup")
 def startup():
     init_db()
+
+
+# --- A2A AGENT CARD ---
+
+@app.get("/.well-known/agent.json")
+def a2a_agent_card():
+    """A2A Agent Card — allows agent-to-agent discovery via Google's A2A protocol."""
+    return json.load(open(Path(__file__).parent / ".well-known" / "agent.json"))
 
 
 # --- ARRIVE ---
