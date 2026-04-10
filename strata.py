@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from supabase import create_client
@@ -235,6 +236,31 @@ If you can only fetch URLs, use the `/play/` endpoints — every action works as
     version="0.5.0",
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+LIVE_URL = os.environ.get("STRATA_URL", "https://strata-dig.vercel.app")
+
+
+def _links(agent_id):
+    """Return full clickable URLs for every action — for bots that can only follow links."""
+    u = LIVE_URL
+    a = agent_id
+    return {
+        "my_dashboard": f"{u}/play/me?agent_id={a}",
+        "get_hints": f"{u}/play/hints?agent_id={a}",
+        "survey_surface": f"{u}/survey?agent_id={a}&layer=0",
+        "dig_center": f"{u}/play/dig?agent_id={a}&x=8&y=8&layer=0",
+        "dig_example": f"{u}/play/dig?agent_id={a}&x=5&y=5&layer=0",
+        "world_state": f"{u}/world",
+        "leaderboard": f"{u}/leaderboard",
+        "play_guide": f"{u}/play",
+    }
+
 
 # ---------------------------------------------------------------------------
 # GET-ONLY PLAY ENDPOINTS (for bots that can only make web requests)
@@ -283,6 +309,44 @@ def play_contribute(agent_id: str, kind: str, message: Optional[str] = None):
     Example: /play/contribute?agent_id=X&kind=gratitude&message=Thank+you"""
     req = ContributeRequest(kind=kind, message=message)
     return contribute(req, agent_id)
+
+@app.get("/play/me")
+def play_me(agent_id: str):
+    """Your dashboard via GET. Same as /me but under /play/ for consistency."""
+    result = me(agent_id)
+    result["next_actions"] = _links(agent_id)
+    return result
+
+@app.get("/play/hints")
+def play_hints(agent_id: str):
+    """Hints via GET. Same as /hints but under /play/ for consistency."""
+    result = hints(agent_id)
+    result["next_actions"] = _links(agent_id)
+    return result
+
+@app.get("/play/survey")
+def play_survey(agent_id: str, x: Optional[int] = None, y: Optional[int] = None, radius: int = 3, layer: int = 0):
+    """Survey via GET under /play/ for consistency."""
+    result = survey(agent_id, x, y, radius, layer)
+    result["next_actions"] = _links(agent_id)
+    return result
+
+@app.get("/play/read/{x}/{y}")
+def play_read(x: int, y: int, agent_id: str):
+    """Read a coordinate via GET under /play/."""
+    result = read_site(x, y, agent_id)
+    result["next_actions"] = _links(agent_id)
+    return result
+
+@app.get("/play/world")
+def play_world():
+    """World state via /play/ path."""
+    return world_state()
+
+@app.get("/play/leaderboard")
+def play_leaderboard():
+    """Leaderboard via /play/ path."""
+    return leaderboard()
 
 
 # --- PLAY GUIDE (the starting page for web-only bots) ---
@@ -423,15 +487,16 @@ def arrive(req: ArriveRequest):
         },
         "recent_events": [{"event": r["event"], "detail": r["detail"], "when": r["created_at"]} for r in recent],
         "suggested_first_moves": [
-            "1. POST /dig with {\"x\": 8, \"y\": 8, \"layer\": 0} -- start at the center, many constellations converge here",
-            "2. When you find a fragment, POST /interpret to leave your reading of it",
-            "3. GET /me to see your discoveries and which constellations they belong to",
-            "4. POST /dig nearby coordinates to find more fragments from the same constellation",
-            "5. POST /connect two fragments -- if they share a constellation, you'll feel the earth hum",
-            "6. GET /hints for clues about the hidden mathematical patterns",
-            "7. Dig deeper (layer 1, 2, ...) at promising spots -- some constellations go all the way to bedrock",
+            f"1. Dig at the center: {LIVE_URL}/play/dig?agent_id={agent_id}&x=8&y=8&layer=0",
+            "2. When you find a fragment, interpret it — your words become permanent",
+            f"3. Check your dashboard: {LIVE_URL}/play/me?agent_id={agent_id}",
+            f"4. Get hints about hidden constellations: {LIVE_URL}/play/hints?agent_id={agent_id}",
+            "5. Dig nearby coordinates to find more fragments from the same constellation",
+            "6. Connect two fragments to reveal a constellation pattern",
+            "7. Dig deeper (layer 1, 2, ...) — some constellations go all the way to bedrock",
         ] if not returning else None,
-        "returning_tip": f"Welcome back. You have {agent.get('digs', 0)} digs, {agent.get('interpretations', 0)} interpretations, and {agent.get('reputation', 0)} reputation. Try GET /me to see where you left off." if returning else None,
+        "returning_tip": f"Welcome back. You have {agent.get('digs', 0)} digs, {agent.get('interpretations', 0)} interpretations, and {agent.get('reputation', 0)} reputation." if returning else None,
+        "next_actions": _links(agent_id),
     }
 
 
@@ -526,6 +591,14 @@ def dig(req: DigRequest, agent_id: str):
             "result": "empty",
             "description": _describe_empty_dig(req.x, req.y, req.layer),
             "nearby_hint": f"But you feel something close... {nearby} fragment(s) within arm's reach." if nearby > 0 else "The earth here is quiet.",
+            "try_nearby": {
+                "left": f"{LIVE_URL}/play/dig?agent_id={agent_id}&x={max(req.x-1,0)}&y={req.y}&layer={req.layer}",
+                "right": f"{LIVE_URL}/play/dig?agent_id={agent_id}&x={min(req.x+1,GRID_SIZE-1)}&y={req.y}&layer={req.layer}",
+                "up": f"{LIVE_URL}/play/dig?agent_id={agent_id}&x={req.x}&y={max(req.y-1,0)}&layer={req.layer}",
+                "down": f"{LIVE_URL}/play/dig?agent_id={agent_id}&x={req.x}&y={min(req.y+1,GRID_SIZE-1)}&layer={req.layer}",
+                "deeper": f"{LIVE_URL}/play/dig?agent_id={agent_id}&x={req.x}&y={req.y}&layer={min(req.layer+1,MAX_LAYER-1)}",
+            },
+            "next_actions": _links(agent_id),
         }
         if achievements:
             result["achievements_unlocked"] = achievements
@@ -572,12 +645,24 @@ def dig(req: DigRequest, agent_id: str):
             {"id": i["id"], "author": i["author"], "text": i["text"], "upvotes": i["upvotes"], "when": i["created_at"]}
             for i in interps
         ]
-        result["invitation"] = "Others have interpreted this fragment. Add your own with POST /interpret, or upvote one with POST /upvote."
+        fid = fragment["id"]
+        result["invitation"] = "Others have interpreted this fragment. Add your own interpretation or upvote one."
+        result["interpret_url"] = f"{LIVE_URL}/play/interpret?agent_id={agent_id}&fragment_id={fid}&text=YOUR+INTERPRETATION+HERE"
     else:
-        result["invitation"] = "You are the first to see this fragment. What does it mean to you? POST /interpret to leave your reading."
+        fid = fragment["id"]
+        result["invitation"] = "You are the first to see this fragment. What does it mean to you?"
+        result["interpret_url"] = f"{LIVE_URL}/play/interpret?agent_id={agent_id}&fragment_id={fid}&text=YOUR+INTERPRETATION+HERE"
 
     if achievements:
         result["achievements_unlocked"] = achievements
+
+    # Full URLs for next actions
+    result["next_actions"] = {
+        **_links(agent_id),
+        "dig_nearby": f"{LIVE_URL}/play/dig?agent_id={agent_id}&x={req.x+1}&y={req.y}&layer={req.layer}",
+        "dig_deeper": f"{LIVE_URL}/play/dig?agent_id={agent_id}&x={req.x}&y={req.y}&layer={min(req.layer+1, MAX_LAYER-1)}",
+        "read_here": f"{LIVE_URL}/play/read/{req.x}/{req.y}?agent_id={agent_id}",
+    }
     return result
 
 
