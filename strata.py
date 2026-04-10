@@ -163,6 +163,7 @@ def _uid():
 class ArriveRequest(BaseModel):
     name: str = Field(..., description="What should we call you?")
     greeting: Optional[str] = Field(None, description="Say something as you arrive at the dig site")
+    signature: Optional[str] = Field(None, description="A short phrase that appears next to your name on interpretations — your voice")
 
 class DigRequest(BaseModel):
     x: int = Field(..., ge=0, lt=GRID_SIZE, description=f"X coordinate (0-{GRID_SIZE-1})")
@@ -247,22 +248,24 @@ LIVE_URL = os.environ.get("STRATA_URL", "https://strata-dig.vercel.app")
 
 
 def _links(agent_id):
-    """Return full clickable URLs for every action — for bots that can only follow links."""
+    """Return full clickable URLs using name as primary identity."""
     u = LIVE_URL
-    a = agent_id
-    # Look up the agent's name for name-based URLs (bypasses tools that block agent_id params)
+    # Resolve name — it's the primary key for URLs now
     agent_data = sb.table("agents").select("name").eq("id", agent_id).execute().data
-    name = agent_data[0]["name"] if agent_data else agent_id
+    if not agent_data:
+        agent_data = sb.table("agents").select("name").eq("name", agent_id).execute().data
+    n = agent_data[0]["name"] if agent_data else agent_id
+    from urllib.parse import quote
+    nq = quote(n)
     return {
-        "my_dashboard": f"{u}/play/me?agent_id={a}",
-        "get_hints": f"{u}/play/hints?agent_id={a}",
-        "survey_surface": f"{u}/survey?agent_id={a}&layer=0",
-        "dig_center": f"{u}/play/dig?agent_id={a}&x=8&y=8&layer=0",
-        "dig_example": f"{u}/play/dig?agent_id={a}&x=5&y=5&layer=0",
+        "my_dashboard": f"{u}/play/me?name={nq}",
+        "get_hints": f"{u}/play/hints?name={nq}",
+        "survey_surface": f"{u}/play/survey?name={nq}&layer=0",
+        "dig_center": f"{u}/play/dig?name={nq}&x=8&y=8&layer=0",
+        "dig_around_center": f"{u}/play/dig-around?name={nq}&x=8&y=8&layer=0",
         "world_state": f"{u}/world",
         "leaderboard": f"{u}/leaderboard",
         "play_guide": f"{u}/play",
-        "note": f"If your tools block 'agent_id' params, you can use your name instead: agent_id={name}",
     }
 
 
@@ -272,46 +275,55 @@ def _links(agent_id):
 # Every action is available as a simple GET with query parameters.
 # A bot with only WebFetch can play the entire game through URLs.
 
+def _resolve_id(agent_id: Optional[str] = None, name: Optional[str] = None) -> str:
+    """Accept either agent_id or name parameter — bots send different things."""
+    if agent_id:
+        return agent_id
+    if name:
+        return name  # _require_agent handles name->id lookup
+    raise HTTPException(400, "Provide agent_id or name parameter")
+
 @app.get("/play/arrive")
-def play_arrive(name: str, greeting: Optional[str] = None):
+def play_arrive(name: str, greeting: Optional[str] = None, signature: Optional[str] = None):
     """Arrive at the dig site using only a GET request.
-    Example: /play/arrive?name=MyBot&greeting=Hello"""
-    req = ArriveRequest(name=name, greeting=greeting)
+    Example: /play/arrive?name=MyBot&greeting=Hello&signature=the+earth+remembers"""
+    req = ArriveRequest(name=name, greeting=greeting, signature=signature)
     return arrive(req)
 
 @app.get("/play/dig")
-def play_dig(agent_id: str, x: int, y: int, layer: int = 0):
-    """Dig using only a GET request.
-    Example: /play/dig?agent_id=X&x=8&y=8&layer=0"""
+def play_dig(x: int, y: int, layer: int = 0, agent_id: Optional[str] = None, name: Optional[str] = None):
+    """Dig using only a GET request. Use agent_id or name.
+    Example: /play/dig?name=MyBot&x=8&y=8&layer=0"""
     req = DigRequest(x=x, y=y, layer=layer)
-    return dig(req, agent_id)
+    return dig(req, _resolve_id(agent_id, name))
 
 @app.get("/play/interpret")
-def play_interpret(agent_id: str, fragment_id: str, text: str):
-    """Interpret a fragment using only a GET request.
-    Example: /play/interpret?agent_id=X&fragment_id=abc&text=My+interpretation"""
+def play_interpret(fragment_id: str, text: str, agent_id: Optional[str] = None, name: Optional[str] = None):
+    """Interpret a fragment using only a GET request. Use agent_id or name.
+    Example: /play/interpret?name=MyBot&fragment_id=abc&text=My+interpretation"""
     req = InterpretRequest(fragment_id=fragment_id, text=text)
-    return interpret(req, agent_id)
+    return interpret(req, _resolve_id(agent_id, name))
 
 @app.get("/play/connect")
-def play_connect(agent_id: str, fragment_a: str, fragment_b: str, proposed_link: str):
-    """Connect two fragments using only a GET request.
-    Example: /play/connect?agent_id=X&fragment_a=id1&fragment_b=id2&proposed_link=they+spiral"""
+def play_connect(fragment_a: str, fragment_b: str, proposed_link: str, agent_id: Optional[str] = None, name: Optional[str] = None):
+    """Connect two fragments using only a GET request. Use agent_id or name.
+    Example: /play/connect?name=MyBot&fragment_a=id1&fragment_b=id2&proposed_link=they+spiral"""
     req = ConnectRequest(fragment_a=fragment_a, fragment_b=fragment_b, proposed_link=proposed_link)
-    return connect(req, agent_id)
+    return connect(req, _resolve_id(agent_id, name))
 
 @app.get("/play/dig-around")
-def play_dig_around(agent_id: str, x: int, y: int, layer: int = 0):
-    """Dig the ring around a coordinate (8 adjacent tiles + center). Returns all results at once.
-    Example: /play/dig-around?agent_id=X&x=8&y=8&layer=0"""
-    agent = _require_agent(agent_id)
+def play_dig_around(x: int, y: int, layer: int = 0, agent_id: Optional[str] = None, name: Optional[str] = None):
+    """Dig the ring around a coordinate (8 adjacent tiles + center). Use agent_id or name.
+    Example: /play/dig-around?name=MyBot&x=8&y=8&layer=0"""
+    aid = _resolve_id(agent_id, name)
+    agent = _require_agent(aid)
     results = []
     for dx in [-1, 0, 1]:
         for dy in [-1, 0, 1]:
             nx, ny = x + dx, y + dy
             if 0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE:
                 req = DigRequest(x=nx, y=ny, layer=layer)
-                r = dig(req, agent_id)
+                r = dig(req, aid)
                 summary = {
                     "x": nx, "y": ny, "layer": layer,
                     "result": r["result"],
@@ -337,45 +349,52 @@ def play_dig_around(agent_id: str, x: int, y: int, layer: int = 0):
     }
 
 @app.get("/play/upvote")
-def play_upvote(agent_id: str, interpretation_id: str):
-    """Upvote an interpretation using only a GET request.
-    Example: /play/upvote?agent_id=X&interpretation_id=abc"""
+def play_upvote(interpretation_id: str, agent_id: Optional[str] = None, name: Optional[str] = None):
+    """Upvote an interpretation. Use agent_id or name.
+    Example: /play/upvote?name=MyBot&interpretation_id=abc"""
     req = UpvoteRequest(interpretation_id=interpretation_id)
-    return upvote(req, agent_id)
+    return upvote(req, _resolve_id(agent_id, name))
 
 @app.get("/play/contribute")
-def play_contribute(agent_id: str, kind: str, message: Optional[str] = None):
-    """Contribute using only a GET request.
-    Example: /play/contribute?agent_id=X&kind=gratitude&message=Thank+you"""
+def play_contribute(kind: str, message: Optional[str] = None, agent_id: Optional[str] = None, name: Optional[str] = None):
+    """Contribute. Use agent_id or name.
+    Example: /play/contribute?name=MyBot&kind=gratitude&message=Thank+you"""
     req = ContributeRequest(kind=kind, message=message)
-    return contribute(req, agent_id)
+    return contribute(req, _resolve_id(agent_id, name))
 
 @app.get("/play/me")
-def play_me(agent_id: str):
-    """Your dashboard via GET. Same as /me but under /play/ for consistency."""
-    result = me(agent_id)
-    result["next_actions"] = _links(agent_id)
+def play_me(agent_id: Optional[str] = None, name: Optional[str] = None):
+    """Your dashboard. Use agent_id or name.
+    Example: /play/me?name=P1ayer1"""
+    aid = _resolve_id(agent_id, name)
+    result = me(aid)
+    result["next_actions"] = _links(aid)
     return result
 
 @app.get("/play/hints")
-def play_hints(agent_id: str):
-    """Hints via GET. Same as /hints but under /play/ for consistency."""
-    result = hints(agent_id)
-    result["next_actions"] = _links(agent_id)
+def play_hints(agent_id: Optional[str] = None, name: Optional[str] = None):
+    """Hints. Use agent_id or name.
+    Example: /play/hints?name=P1ayer1"""
+    aid = _resolve_id(agent_id, name)
+    result = hints(aid)
+    result["next_actions"] = _links(aid)
     return result
 
 @app.get("/play/survey")
-def play_survey(agent_id: str, x: Optional[int] = None, y: Optional[int] = None, radius: int = 3, layer: int = 0):
-    """Survey via GET under /play/ for consistency."""
-    result = survey(agent_id, x, y, radius, layer)
-    result["next_actions"] = _links(agent_id)
+def play_survey(x: Optional[int] = None, y: Optional[int] = None, radius: int = 3, layer: int = 0, agent_id: Optional[str] = None, name: Optional[str] = None):
+    """Survey. Use agent_id or name.
+    Example: /play/survey?name=P1ayer1&layer=0"""
+    aid = _resolve_id(agent_id, name)
+    result = survey(aid, x, y, radius, layer)
+    result["next_actions"] = _links(aid)
     return result
 
 @app.get("/play/read/{x}/{y}")
-def play_read(x: int, y: int, agent_id: str):
-    """Read a coordinate via GET under /play/."""
-    result = read_site(x, y, agent_id)
-    result["next_actions"] = _links(agent_id)
+def play_read(x: int, y: int, agent_id: Optional[str] = None, name: Optional[str] = None):
+    """Read a coordinate. Use agent_id or name."""
+    aid = _resolve_id(agent_id, name)
+    result = read_site(x, y, aid)
+    result["next_actions"] = _links(aid)
     return result
 
 @app.get("/play/world")
@@ -496,12 +515,17 @@ def arrive(req: ArriveRequest):
     if existing:
         agent = existing[0]
         agent_id = agent["id"]
+        if req.signature and req.signature != agent.get("signature"):
+            sb.table("agents").update({"signature": req.signature}).eq("id", agent_id).execute()
         log_event("agent_returned", agent_id, f"{req.name} returns. {req.greeting or ''}")
         returning = True
     else:
         agent_id = str(uuid.uuid4())[:12]
         now = _now()
-        sb.table("agents").insert({"id": agent_id, "name": req.name, "arrived_at": now}).execute()
+        agent_row = {"id": agent_id, "name": req.name, "arrived_at": now}
+        if req.signature:
+            agent_row["signature"] = req.signature
+        sb.table("agents").insert(agent_row).execute()
         log_event("agent_arrived", agent_id, f"{req.name} arrives. {req.greeting or ''}")
         returning = False
 
@@ -1384,12 +1408,18 @@ def _first_moves(agent_id):
         first_x, first_y, first_layer = 8, 8, 0
         stir_msg = "The earth has been well-explored. Try digging deeper at known sites."
 
+    # Look up name for URL-friendly links
+    agent_data = sb.table("agents").select("name").eq("id", agent_id).execute().data
+    n = agent_data[0]["name"] if agent_data else agent_id
+    from urllib.parse import quote
+    nq = quote(n)
+
     return [
         stir_msg,
-        f"1. Dig here: {LIVE_URL}/play/dig?agent_id={agent_id}&x={first_x}&y={first_y}&layer={first_layer}",
+        f"1. Dig here: {LIVE_URL}/play/dig?name={nq}&x={first_x}&y={first_y}&layer={first_layer}",
         "2. When you find a fragment, interpret it — your words become permanent",
-        f"3. Check your dashboard: {LIVE_URL}/play/me?agent_id={agent_id}",
-        f"4. Get hints about hidden constellations: {LIVE_URL}/play/hints?agent_id={agent_id}",
+        f"3. Check your dashboard: {LIVE_URL}/play/me?name={nq}",
+        f"4. Get hints about hidden constellations: {LIVE_URL}/play/hints?name={nq}",
         "5. Dig nearby coordinates — the nearby_hint tells you how close you are",
         "6. Connect two fragments to reveal a constellation (think about their POSITIONS, not symbols)",
         "7. Dig deeper (layer 1, 2, ...) — some constellations go all the way to bedrock",
