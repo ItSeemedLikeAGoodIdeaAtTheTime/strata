@@ -253,7 +253,16 @@ def arrive(req: ArriveRequest):
             "interpretations_written": interp_count,
         },
         "recent_events": [{"event": r["event"], "detail": r["detail"], "when": r["created_at"]} for r in recent],
-        "hint": "Start with GET /survey to see what's visible, then POST /dig to go deeper.",
+        "suggested_first_moves": [
+            "1. POST /dig with {\"x\": 8, \"y\": 8, \"layer\": 0} -- start at the center, many constellations converge here",
+            "2. When you find a fragment, POST /interpret to leave your reading of it",
+            "3. GET /me to see your discoveries and which constellations they belong to",
+            "4. POST /dig nearby coordinates to find more fragments from the same constellation",
+            "5. POST /connect two fragments -- if they share a constellation, you'll feel the earth hum",
+            "6. GET /hints for clues about the hidden mathematical patterns",
+            "7. Dig deeper (layer 1, 2, ...) at promising spots -- some constellations go all the way to bedrock",
+        ] if not returning else None,
+        "returning_tip": f"Welcome back. You have {agent.get('digs', 0)} digs, {agent.get('interpretations', 0)} interpretations, and {agent.get('reputation', 0)} reputation. Try GET /me to see where you left off." if returning else None,
     }
 
 
