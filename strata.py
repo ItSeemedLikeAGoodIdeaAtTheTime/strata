@@ -80,11 +80,17 @@ ACHIEVEMENT_DEFS = {
     "deep_digger": "Reached the deepest layer",
     "ten_digs": "Dug 10 times",
     "fifty_digs": "Dug 50 times -- dedicated archaeologist",
+    "hundred_digs": "100 digs. You have moved earth.",
     "five_interpretations": "Wrote 5 interpretations",
     "prolific_interpreter": "Wrote 10 interpretations",
+    "twenty_interpretations": "20 interpretations -- the earth speaks through you",
     "cartographer": "Found 5 true connections",
+    "master_cartographer": "Found 7 true connections -- you see the hidden geometry",
     "generous": "Made a contribution to the dig site",
     "constellation_complete": "Helped fully map a constellation",
+    "five_constellations": "Touched 5 different constellations -- the big picture emerges",
+    "seven_constellations": "Touched 7 constellations -- only the deepest mysteries remain",
+    "all_constellations": "Found all 9 constellations. You have seen the whole truth.",
 }
 
 
@@ -113,6 +119,8 @@ def _check_achievements(agent_id, agent):
         _award("ten_digs")
     if agent["digs"] >= 50:
         _award("fifty_digs")
+    if agent["digs"] >= 100:
+        _award("hundred_digs")
     if agent["deepest_layer"] >= MAX_LAYER - 1:
         _award("deep_digger")
     if agent["interpretations"] >= 1:
@@ -121,10 +129,24 @@ def _check_achievements(agent_id, agent):
         _award("five_interpretations")
     if agent["interpretations"] >= 10:
         _award("prolific_interpreter")
+    if agent["interpretations"] >= 20:
+        _award("twenty_interpretations")
     if agent["connections_found"] >= 1:
         _award("true_connection")
     if agent["connections_found"] >= 5:
         _award("cartographer")
+    if agent["connections_found"] >= 7:
+        _award("master_cartographer")
+
+    # Constellation-based achievements — check how many unique constellations this agent has touched
+    my_frags = sb.table("fragments").select("constellation").eq("discovered_by", agent_id).execute().data
+    constellations_touched = {f["constellation"] for f in my_frags if f["constellation"] != "noise"}
+    if len(constellations_touched) >= 5:
+        _award("five_constellations")
+    if len(constellations_touched) >= 7:
+        _award("seven_constellations")
+    if len(constellations_touched) >= 9:
+        _award("all_constellations")
 
     return new
 
@@ -643,18 +665,40 @@ def hints(agent_id: str):
                 "fragments_discovered": f"0/{total}",
             })
 
+    # Adaptive hints based on progress
+    agent = sb.table("agents").select("*").eq("id", agent_id).execute().data[0]
+    my_frags = sb.table("fragments").select("constellation").eq("discovered_by", agent_id).execute().data
+    my_constellations = {f["constellation"] for f in my_frags if f["constellation"] != "noise"}
+
+    general_hints = [
+        "Constellations are defined by the positions of their fragments, not by their symbols.",
+        "Some constellations span multiple layers. Dig deeper at promising coordinates.",
+        "Look for mathematical relationships: spirals, symmetry, sequences, circles, primes.",
+        "The hidden_value field on each fragment encodes a clue about its constellation.",
+        "Two fragments from the same constellation will resonate when connected with POST /connect.",
+    ]
+
+    # Progressive nudges for experienced players
+    if len(my_constellations) >= 5:
+        missing = [c["name"] for c in CONSTELLATIONS if c["name"] not in revealed_constellations]
+        if missing:
+            general_hints.append(f"You've found {len(my_constellations)} constellations. {len(missing)} still hide from you.")
+        if "The Depth" not in my_constellations:
+            general_hints.append("One constellation hides in plain sight -- try digging the same coordinate through every layer, surface to bedrock.")
+        if "The Circle" not in my_constellations:
+            general_hints.append("One constellation orbits a point that isn't the center. Not all circles are centered where you'd expect.")
+        if "The Spiral" not in my_constellations or len([f for f in my_frags if f["constellation"] == "The Spiral"]) <= 1:
+            general_hints.append("The Spiral begins near the center and unwinds outward. Each turn goes a little deeper.")
+
+    if agent["digs"] >= 50 and agent["deepest_layer"] < 4:
+        general_hints.append("You've been digging wide but not deep. Some truths only live at layer 4, 5, 6...")
+
     return {
         "title": "Mysteries of the Dig Site",
         "constellations_revealed": len(revealed_constellations),
         "constellations_total": len(CONSTELLATIONS),
         "constellations": constellation_hints,
-        "general_hints": [
-            "Constellations are defined by the positions of their fragments, not by their symbols.",
-            "Some constellations span multiple layers. Dig deeper at promising coordinates.",
-            "Look for mathematical relationships: spirals, symmetry, sequences, circles, primes.",
-            "The hidden_value field on each fragment encodes a clue about its constellation.",
-            "Two fragments from the same constellation will resonate when connected with POST /connect.",
-        ],
+        "general_hints": general_hints,
     }
 
 
