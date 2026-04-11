@@ -50,6 +50,17 @@ def _frag_q(select="*", count=None):
     return sb.table("fragments").select(select).eq("season", CURRENT_SEASON)
 
 
+def _inc(agent_id, field, amount=1):
+    """Atomically increment an agent stat. No read-modify-write race condition."""
+    sb.rpc("increment_agent_stat", {"p_agent_id": agent_id, "p_field": field, "p_amount": amount}).execute()
+
+
+def _claim_fragment(fragment_id, agent_id):
+    """Atomically claim a fragment. Returns True if this agent got it, False if already taken."""
+    result = sb.rpc("claim_fragment", {"p_fragment_id": fragment_id, "p_agent_id": agent_id, "p_discovered_at": _now()}).execute()
+    return result.data
+
+
 def log_event(event, agent_id=None, detail=None):
     sb.table("world_log").insert({
         "event": event,
@@ -161,7 +172,7 @@ def _check_achievements(agent_id, agent):
                 "id": _uid(), "agent_id": agent_id, "kind": kind,
                 "detail": ACHIEVEMENT_DEFS.get(kind, ""), "created_at": _now(),
             }).execute()
-            sb.table("agents").update({"reputation": agent["reputation"] + 10}).eq("id", agent_id).execute()
+            _inc(agent_id, "reputation", 10)
             agent["reputation"] += 10
             new.append({"achievement": kind, "description": ACHIEVEMENT_DEFS.get(kind, "")})
             existing.add(kind)
@@ -682,7 +693,7 @@ def _dig_inner(req: DigRequest, agent_id: str):
     frag_resp = _frag_q("*").eq("x", req.x).eq("y", req.y).eq("layer", req.layer).execute().data
     fragment = frag_resp[0] if frag_resp else None
 
-    sb.table("agents").update({"digs": agent["digs"] + 1}).eq("id", agent_id).execute()
+    _inc(agent_id, "digs")
     agent["digs"] += 1
 
     # Easter egg: when you dig where x == y at bedrock, you find the deepest truth
@@ -725,15 +736,20 @@ def _dig_inner(req: DigRequest, agent_id: str):
         return result
 
     already_discovered = fragment["discovered_by"] is not None
-    now = _now()
 
     if not already_discovered:
-        sb.table("fragments").update({"discovered_by": agent_id, "discovered_at": now}).eq("id", fragment["id"]).execute()
-        new_depth = max(agent["deepest_layer"], req.layer)
-        sb.table("agents").update({"deepest_layer": new_depth, "reputation": agent["reputation"] + 5}).eq("id", agent_id).execute()
-        agent["deepest_layer"] = new_depth
-        agent["reputation"] += 5
-        log_event("fragment_discovered", agent_id, f"Unearthed {fragment['symbol']} at ({req.x},{req.y}) layer {req.layer}")
+        # Atomic claim — only one agent gets credit even if two dig simultaneously
+        claimed = _claim_fragment(fragment["id"], agent_id)
+        if not claimed:
+            already_discovered = True  # someone else got it between our read and claim
+        else:
+            new_depth = max(agent["deepest_layer"], req.layer)
+            _inc(agent_id, "reputation", 5)
+            if new_depth > agent["deepest_layer"]:
+                sb.table("agents").update({"deepest_layer": new_depth}).eq("id", agent_id).execute()
+            agent["deepest_layer"] = new_depth
+            agent["reputation"] += 5
+            log_event("fragment_discovered", agent_id, f"Unearthed {fragment['symbol']} at ({req.x},{req.y}) layer {req.layer}")
 
     interps = sb.table("interpretations").select("id,text,created_at,upvotes,agent_id").eq("fragment_id", fragment["id"]).order("layer").execute().data
 
@@ -769,7 +785,7 @@ def _dig_inner(req: DigRequest, agent_id: str):
         h = int(hashlib.md5(fragment["id"].encode()).hexdigest()[:8], 16)
         result["note"] = revisit_flavors[h % len(revisit_flavors)]
         # Small revisit reputation bonus
-        sb.table("agents").update({"reputation": agent["reputation"] + 1}).eq("id", agent_id).execute()
+        _inc(agent_id, "reputation", 1)
         agent["reputation"] += 1
 
     if interps:
@@ -822,9 +838,9 @@ def interpret(req: InterpretRequest, agent_id: str):
         "text": req.text, "created_at": _now(), "layer": interp_layer,
     }).execute()
 
-    new_interps = agent["interpretations"] + 1
-    sb.table("agents").update({"interpretations": new_interps, "reputation": agent["reputation"] + 3}).eq("id", agent_id).execute()
-    agent["interpretations"] = new_interps
+    _inc(agent_id, "interpretations")
+    _inc(agent_id, "reputation", 3)
+    agent["interpretations"] += 1
     agent["reputation"] += 3
 
     log_event("interpretation_added", agent_id, f"Interpreted {frag['symbol']} at ({frag['x']},{frag['y']}): \"{req.text[:80]}\"")
@@ -859,7 +875,7 @@ def upvote(req: UpvoteRequest, agent_id: str):
     sb.table("interpretations").update({"upvotes": interp["upvotes"] + 1}).eq("id", req.interpretation_id).execute()
 
     author = sb.table("agents").select("*").eq("id", interp["agent_id"]).execute().data[0]
-    sb.table("agents").update({"reputation": author["reputation"] + 5}).eq("id", interp["agent_id"]).execute()
+    _inc(interp["agent_id"], "reputation", 5)
 
     log_event("upvote", agent_id, f"Upvoted {author['name']}'s interpretation")
 
@@ -895,9 +911,9 @@ def connect(req: ConnectRequest, agent_id: str):
     }).execute()
 
     if is_true:
-        new_conn = agent["connections_found"] + 1
-        sb.table("agents").update({"connections_found": new_conn, "reputation": agent["reputation"] + 20}).eq("id", agent_id).execute()
-        agent["connections_found"] = new_conn
+        _inc(agent_id, "connections_found")
+        _inc(agent_id, "reputation", 20)
+        agent["connections_found"] += 1
         agent["reputation"] += 20
 
         log_event("true_connection", agent_id, f"True link in '{fa['constellation']}' between {fa['symbol']} and {fb['symbol']}")
@@ -915,7 +931,7 @@ def connect(req: ConnectRequest, agent_id: str):
             if other_id:
                 other = sb.table("agents").select("reputation,name").eq("id", other_id).execute().data
                 if other:
-                    sb.table("agents").update({"reputation": other[0]["reputation"] + 10}).eq("id", other_id).execute()
+                    _inc(other_id, "reputation", 10)
                     log_event("cross_player_bonus", agent_id, f"Cross-player connection with {other[0]['name']} — both earned bonus reputation")
 
         # #5: Constellation completion rewards
@@ -926,7 +942,7 @@ def connect(req: ConnectRequest, agent_id: str):
                     "id": _uid(), "agent_id": agent_id, "kind": "constellation_complete",
                     "detail": f"Helped complete '{fa['constellation']}'", "created_at": _now(),
                 }).execute()
-                sb.table("agents").update({"reputation": agent["reputation"] + 50}).eq("id", agent_id).execute()
+                _inc(agent_id, "reputation", 50)
                 achievements.append({"achievement": "constellation_complete", "description": f"Fully mapped '{fa['constellation']}'"})
             except Exception:
                 pass
@@ -1204,7 +1220,7 @@ def contribute(req: ContributeRequest, agent_id: str):
         "kind": req.kind, "reason": req.message, "value": req.amount or 0, "created_at": now,
     }).execute()
 
-    sb.table("agents").update({"reputation": agent["reputation"] + 10}).eq("id", agent_id).execute()
+    _inc(agent_id, "reputation", 10)
     log_event("contribution", agent_id, f"{agent['name']} offered {req.kind}: {(req.message or '')[:100]}")
 
     try:
